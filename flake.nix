@@ -45,10 +45,10 @@
     utils.eachSupportedSystem =
       inputs.utils.lib.eachSystem utils.supportedSystems;
 
-    mkPackages = pkgs: let
-      quarklib = pkgs.callPackage ./quark/lib.nix {};
-      ghcWithTidal = pkgs.haskellPackages.ghcWithPackages (p: [p.tidal]);
-    in rec {
+    mkPackagesOverlay = final: prev: let
+      quarklib = prev.callPackage ./quark/lib.nix {};
+      ghcWithTidal = prev.haskellPackages.ghcWithPackages (p: [p.tidal]);
+
       # SuperCollider quarks that are necessary for Tidal.
       dirt-samples = quarklib.mkQuark {
         name = "Dirt-Samples";
@@ -65,24 +65,24 @@
       };
 
       # Supercollider with the SC3 plugins used by tidal.
-      supercollider = pkgs.supercollider-with-plugins.override {
-        plugins = [pkgs.supercolliderPlugins.sc3-plugins];
+      supercollider = prev.supercollider-with-plugins.override {
+        plugins = [prev.supercolliderPlugins.sc3-plugins];
       };
 
       # A sclang command with superdirt included via conf yaml.
-      sclang-with-superdirt = pkgs.writeShellApplication {
+      sclang-with-superdirt = prev.writeShellApplication {
         name = "sclang-with-superdirt";
         runtimeInputs = [supercollider];
         text = ''
-          ${supercollider}/bin/sclang -l "${superdirt}/sclang_conf.yaml" "$@"
+          ${supercollider}/bin/sclang -l "${final.superdirt}/sclang_conf.yaml" "$@"
         '';
       };
 
       # A very simple default superdirt start file.
-      superdirt-start-sc = pkgs.writeText "superdirt-start.sc" "SuperDirt.start;";
+      superdirt-start-sc = prev.writeText "superdirt-start.sc" "SuperDirt.start;";
 
       # Run `SuperDirt.start` in supercollider, ready for tidal.
-      superdirt-start = pkgs.writeShellApplication {
+      superdirt-start = prev.writeShellApplication {
         name = "superdirt-start";
         runtimeInputs = [supercollider];
         text = ''
@@ -103,34 +103,34 @@
             exit 1
           fi
 
-          ${sclang-with-superdirt}/bin/sclang-with-superdirt "$start_script"
+          ${final.sclang-with-superdirt}/bin/sclang-with-superdirt "$start_script"
         '';
       };
 
       # Installs SuperDirt under your user's supercollider quarks.
-      superdirt-install = pkgs.writeShellScriptBin "superdirt-install" ''
-        ${supercollider}/bin/sclang ${superdirt}/install.scd
+      superdirt-install = prev.writeShellScriptBin "superdirt-install" ''
+        ${supercollider}/bin/sclang ${final.superdirt}/install.scd
       '';
 
       # Run the tidal interpreter (ghci running BootTidal.hs).
-      tidal = pkgs.writeShellScriptBin "tidal" ''
-        ${ghcWithTidal}/bin/ghci -ghci-script ${inputs.tidal-src}/BootTidal.hs
+      tidal = prev.writeShellScriptBin "tidal" ''
+        ${final.ghcWithTidal}/bin/ghci -ghci-script ${inputs.tidal-src}/BootTidal.hs
       '';
 
       # Vim plugin for tidalcycles.
-      vim-tidal = pkgs.vimUtils.buildVimPluginFrom2Nix {
+      vim-tidal = prev.vimUtils.buildVimPluginFrom2Nix {
         pname = "vim-tidal";
         version = "master";
         src = inputs.vim-tidal-src;
         postInstall = let
           # A vimscript file to set Nix defaults for ghci and `BootTidal.hs`.
-          defaults-file = pkgs.writeText "vim-tidal-defaults.vim" ''
+          defaults-file = prev.writeText "vim-tidal-defaults.vim" ''
             " Prepend defaults provided by Nix packages.
             if !exists("g:tidal_ghci")
-              let g:tidal_ghci = "${ghcWithTidal}/bin/ghci"
+              let g:tidal_ghci = "${final.ghcWithTidal}/bin/ghci"
             endif
             if !exists("g:tidal_sclang")
-              let g:tidal_sclang = "${sclang-with-superdirt}/bin/sclang-with-superdirt"
+              let g:tidal_sclang = "${final.sclang-with-superdirt}/bin/sclang-with-superdirt"
             endif
             if !exists("g:tidal_boot_fallback")
               let g:tidal_boot_fallback = "${inputs.tidal-src}/BootTidal.hs"
@@ -152,34 +152,33 @@
         '';
         meta = {
           homepage = "https://github.com/tidalcycles/vim-tidal.vim";
-          license = pkgs.lib.licenses.mit;
+          license = prev.lib.licenses.mit;
         };
       };
+    in {
+      inherit superdirt-start superdirt-install tidal sclang-with-superdirt ghcWithTidal quarklib superdirt;
+      vimPlugins = prev.vimPlugins // {inherit vim-tidal;};
+      supercollider-w-superdirt = supercollider;
     };
 
     overlays = rec {
-      tidal = final: prev: let
-        tidalpkgs = mkPackages prev;
-      in {
-        inherit (tidalpkgs) superdirt-start superdirt-install tidal sclang-with-superdirt;
-        vimPlugins = prev.vimPlugins // {inherit (tidalpkgs) vim-tidal;};
-      };
+      tidal = mkPackagesOverlay;
       default = tidal;
     };
 
-    mkDevShells = pkgs: tidalpkgs: rec {
+    mkDevShells = pkgs: rec {
       # A shell that provides a set of commonly useful packages for tidal.
       tidal = pkgs.mkShell {
         name = "tidal";
         buildInputs = [
-          tidalpkgs.supercollider
-          tidalpkgs.superdirt-start
-          tidalpkgs.superdirt-install
-          tidalpkgs.tidal
-          tidalpkgs.sclang-with-superdirt
+          pkgs.supercollider-w-superdirt
+          pkgs.superdirt-start
+          pkgs.superdirt-install
+          pkgs.tidal
+          pkgs.sclang-with-superdirt
         ];
         # Convenient access to a config providing all quarks required for Tidal.
-        SUPERDIRT_SCLANG_CONF = "${tidalpkgs.superdirt}/sclang_conf.yaml";
+        SUPERDIRT_SCLANG_CONF = "${pkgs.superdirt}/sclang_conf.yaml";
       };
       default = tidal;
     };
@@ -195,10 +194,15 @@
     };
 
     mkOutput = system: let
-      pkgs = inputs.nixpkgs.legacyPackages.${system};
+      pkgs = import inputs.nixpkgs {
+        inherit system;
+        overlays = [overlays.tidal];
+      };
     in rec {
-      packages = mkPackages pkgs;
-      devShells = mkDevShells pkgs packages;
+      packages = with pkgs; {
+        inherit supercollider-w-superdirt superdirt-start superdirt-install tidal sclang-with-superdirt ghcWithTidal superdirt;
+      };
+      devShells = mkDevShells pkgs;
       formatter = pkgs.alejandra;
     };
 
